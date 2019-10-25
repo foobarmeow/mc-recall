@@ -159,6 +159,7 @@ public class Main extends JavaPlugin {
 			waypointName.equalsIgnoreCase(commandRecallShort) ||
 			waypointName.equalsIgnoreCase(commandList)) {
 			player.sendMessage("Cannot create a waypoint with any reserved words: waypoint, recall, r");
+			return;
 		}
 		
 		if (waypointName.equalsIgnoreCase(commandCreateWaypoint)) {
