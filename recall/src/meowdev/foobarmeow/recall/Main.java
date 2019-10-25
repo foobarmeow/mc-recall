@@ -4,73 +4,33 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.entity.Player;
-import org.bukkit.Bukkit;
 import org.bukkit.Location;
-import org.bukkit.World;
-
-import java.util.HashMap;
-import java.io.IOException;
-import java.io.FileWriter;
-import java.io.FileReader;
-import java.util.logging.Level;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 
 
 public class Main extends JavaPlugin {
 	
 	int stop;
 	static String commandCreateWaypoint = "waypoint";
+	static String commandDeleteWaypoint = "del";
 	static String commandRecall = "recall";
 	static String commandRecallShort = "r";
 	static String commandList = "list";
-	
-	private HashMap<String, String> playerInfo = new HashMap<String, String>();
+	static String waypointsSection = "waypoints";
 	
 	@Override
 	public void onEnable() {
-		this.getCommand("r").setExecutor(this);
-		JavaPlugin plugin = this;
-		try (FileReader reader = new FileReader("waypoints.json")) {
-			// Parse JSON into playerInfo
-			HashMap<String, String> pi = new Gson().fromJson(reader, playerInfo.getClass());
-			if (pi != null) {
-				playerInfo = pi;
-			}
-		} catch (IOException e) {
-			// Do nothing if it doesn't exist, we will write it later
-		}
+		this.reloadConfig();
 		
-		// Setup Scheduler to intermittently save player info
-		this.stop = Bukkit.getScheduler().scheduleSyncRepeatingTask(this, new Runnable() {
-			public void run() {
-				if (playerInfo.isEmpty()) {
-					return;
-				}
-				try (FileWriter writer = new FileWriter("waypoints.json")) {
-					String jsonStr = new Gson().toJson(playerInfo);
-					writer.write(jsonStr);
-					writer.flush();
-				} catch (IOException e) {
-					plugin.getLogger().log(Level.SEVERE, e.getMessage());
-				}
-			}
-		}, 240, 240);
+		// Save the default config if it doesn't exist
+		this.saveDefaultConfig();
+		
+		// Setup /r as the entry point
+		this.getCommand("r").setExecutor(this);
 	}
 
 	@Override
 	public void onDisable() {
-		if (playerInfo.isEmpty()) {
-			return;
-		}
-		try (FileWriter writer = new FileWriter("waypoints.json")) {
-			String jsonStr = new Gson().toJson(playerInfo);
-			writer.write(jsonStr);
-			writer.flush();
-			this.getLogger().log(Level.INFO, "Saved waypoints.json on disable");
-		} catch (IOException e) {
-			this.getLogger().log(Level.SEVERE, e.getMessage());
-		}
+		this.saveConfig();
 	}
 	
 	public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
@@ -93,15 +53,24 @@ public class Main extends JavaPlugin {
 		
 		// If this command is to create a waypoint
 		if (args[0].equalsIgnoreCase(this.commandCreateWaypoint)) {
-			this.createWaypoint(player, args);
+			this.createWaypoint(player, args[1]);
+			return true;
+		}
+
+		// If this command is to delete a waypoint
+		if (args[0].equalsIgnoreCase(this.commandDeleteWaypoint)) {
+			this.deleteWaypoint(args[1]);
+			player.sendMessage("Deleted waypoint " + args[1]);
 			return true;
 		}
 		
 		// If this command is to recall
 		if (args[0].equalsIgnoreCase(this.commandRecall) || args[0].equalsIgnoreCase(commandRecallShort)) {
 			// Find the location last set for this player's ID
-			if (this.playerInfo.containsKey(player.getDisplayName())) {
-				this.teleport(player, player.getDisplayName());
+			if (this.readWaypointFromConfiguration(player.getDisplayName()) != null) {
+				Location oldLocation = player.getLocation();
+				player.teleport(this.readWaypointFromConfiguration(player.getDisplayName()));
+				this.saveWayopointToConfiguration(player.getDisplayName(), oldLocation);
 				return true;
 			} else {
 				player.sendMessage("No known last location to recall to...");
@@ -111,14 +80,15 @@ public class Main extends JavaPlugin {
 
 		// If this command is to list
 		if (args[0].equalsIgnoreCase(this.commandList)) {
-			String pi = new GsonBuilder().setPrettyPrinting().create().toJson(playerInfo);
-			player.sendMessage(pi);
+			// TODO
 			return true;
 		}
 		
 		// Otherwise, see if this matches a waypoint
-		if (this.playerInfo.containsKey(args[0])) {
-			this.teleport(player, args[0]);
+		if (this.readWaypointFromConfiguration(args[0]) != null) {
+			Location oldLocation = player.getLocation();
+			player.teleport(this.readWaypointFromConfiguration(args[0]));
+			this.saveWayopointToConfiguration(player.getDisplayName(), oldLocation);
 			return true;
 		}
 
@@ -130,45 +100,41 @@ public class Main extends JavaPlugin {
 		return "To create a waypoint, type '/r <waypoint name>'.\nTo recall to a waypoint, type '/r <waypoint name>'.\nYour own recall waypoint is keyed on your name. Waypoints can be viewed with the 'list' command.";
 	}
 	
-	private void teleport(Player player, String waypoint) {
-		// Save this location so they can recall to it
-		Location oldLocation = player.getLocation();
-		player.teleport(this.deserializeLocation(this.playerInfo.get(waypoint)));
-		this.playerInfo.put(player.getDisplayName(), this.serializeLocation(oldLocation));
-	}
-	
-	private String serializeLocation(Location loc) {
-		return loc.getWorld().getName() + ":" + loc.getBlockX() + ":" + loc.getBlockY() + ":" + loc.getBlockZ();
-	}
-	
-	private Location deserializeLocation(String loc) {
-		String[] parts = loc.split(":");
-	    World w = Bukkit.getServer().getWorld(parts[0]);
-        double x = Double.parseDouble(parts[1]);
-        double y = Double.parseDouble(parts[2]);
-        double z = Double.parseDouble(parts[3]);
-        return new Location(w, x, y, z);
-	}
-	
-	private void createWaypoint(Player player, String[] args) {
-		// Get name of waypoint from args
-		final String waypointName = args[1];
-		
-		if (waypointName.equalsIgnoreCase(commandCreateWaypoint) || 
-			waypointName.equalsIgnoreCase(commandRecall) || 
-			waypointName.equalsIgnoreCase(commandRecallShort) ||
-			waypointName.equalsIgnoreCase(commandList)) {
+	private void createWaypoint(Player player, String name) {
+		// Guard against waypoint names being a command name
+		if (name.equalsIgnoreCase(commandCreateWaypoint) || 
+			name.equalsIgnoreCase(commandRecall) || 
+			name.equalsIgnoreCase(commandRecallShort) ||
+			name.equalsIgnoreCase(commandList)) {
 			player.sendMessage("Cannot create a waypoint with any reserved words: waypoint, recall, r");
 			return;
 		}
 		
-		if (waypointName.equalsIgnoreCase(commandCreateWaypoint)) {
-			player.sendMessage("Can't create a waypoint called 'waypoint'");
+		Location loc = player.getLocation();
+		this.saveWayopointToConfiguration(name, loc);
+		player.sendMessage(String.format("Set waypoint %s to %d, %d, %d", name, loc.getBlockX(), loc.getBlockY(), loc.getBlockZ()));
+	}
+	
+	private void deleteWaypoint(String name) {
+		String waypointKey = String.format("%s.%s", waypointsSection, name);
+		if (!this.getConfig().contains(waypointKey)) {
 			return;
 		}
 		
-		final Location location = player.getLocation();
-		this.playerInfo.put(waypointName, this.serializeLocation(location));
-		player.sendMessage(String.format("Set waypoint %s to %d, %d, %d", waypointName, location.getBlockX(), location.getBlockY(), location.getBlockZ()));
+		this.getConfig().set(waypointKey, null);
+	}
+	
+	private Location readWaypointFromConfiguration(String name) {
+		String waypointKey = String.format("%s.%s", waypointsSection, name);
+		if (!this.getConfig().contains(waypointKey)) {
+			return null;
+		}
+		
+		return (Location) this.getConfig().get(waypointKey);
+	}
+	
+	private void saveWayopointToConfiguration(String name, Location loc) {
+		this.getConfig().set(String.format("%s.%s", waypointsSection, name), loc);
+		this.saveConfig();
 	}
 }
