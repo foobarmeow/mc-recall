@@ -1,0 +1,9 @@
+main: meowdev.foobarmeow.recall.Main
+name: Recall
+version: 1.0
+author: foobarmeow
+description: Recall teleportation plugin
+commands:
+    r:
+      description: Root command
+      usage: /r
